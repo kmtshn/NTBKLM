@@ -125,21 +125,25 @@ CRITICAL RULES:
 /**
  * Generate a text-free background image via Cloudflare Workers proxy.
  * 
- * The Workers endpoint handles the OpenAI API key server-side,
- * so NO api key or Authorization header is sent from the browser.
+ * Uses OpenAI's /v1/images/edits endpoint (proxied through Workers).
+ * The original slide image is sent as a reference so gpt-image-1 can
+ * see the actual design and reproduce it WITHOUT text.
  * 
- * Request:  POST { model, prompt, size } -> Workers -> OpenAI gpt-image-1
+ * Workers handles the OpenAI API key server-side — NO api key or
+ * Authorization header is sent from the browser.
+ * 
+ * Request:  POST { model, prompt, image, size } -> Workers -> OpenAI /v1/images/edits
  * Response: { data: [{ b64_json: "..." }] }
  * 
- * @param {string} imageBase64 - Base64 encoded image (used to build prompt context)
+ * @param {string} imageBase64 - Base64 encoded original slide image
  * @param {string} mimeType - MIME type of the image ('image/png' or 'image/jpeg')
  * @param {function} onLog - Logging callback
  * @returns {Promise<string>} Data URL of the generated background image
  */
 export async function generateCleanBackground(imageBase64, mimeType = 'image/png', onLog = () => {}) {
-  onLog('AI画像生成で背景を作成中（Cloudflare Workers経由）...');
+  onLog('AI画像編集で背景を作成中（元画像参照 → テキスト除去）...');
 
-  const prompt = `Look at this presentation slide image carefully. 
+  const prompt = `Look at this presentation slide image carefully.
 Reproduce the EXACT same image but with ALL text completely removed.
 
 IMPORTANT RULES:
@@ -153,16 +157,21 @@ IMPORTANT RULES:
 - Maintain the same aspect ratio and overall composition
 - The background areas where text was removed should blend seamlessly`;
 
+  // Build the data URL for the source image
+  const imageDataUrl = `data:${mimeType};base64,${imageBase64}`;
+
   let lastError;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      onLog(`  Workers API画像生成呼び出し中... (試行 ${attempt}/3)`);
+      onLog(`  Workers API画像編集呼び出し中... (試行 ${attempt}/3)`);
 
       const requestBody = {
         model: 'gpt-image-1',
         prompt: prompt,
-        size: '1024x1024',
+        image: imageDataUrl,
+        size: '1536x1024',
+        quality: 'medium',
       };
 
       const response = await fetch(WORKERS_IMAGE_URL, {
@@ -201,7 +210,7 @@ IMPORTANT RULES:
 
       if (b64Json) {
         const dataUrl = `data:image/png;base64,${b64Json}`;
-        onLog('  AI背景画像生成完了', 'success');
+        onLog('  AI背景画像生成完了（元画像ベース）', 'success');
         return dataUrl;
       }
 

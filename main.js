@@ -31,30 +31,30 @@
  *     AI generation fails
  */
 
-import { UIController } from './ui.js?v=20260318c';
-import { parsePptx } from './pptxParser.js?v=20260318c';
+import { UIController } from './ui.js?v=20260318d';
+import { parsePptx } from './pptxParser.js?v=20260318d';
 import {
   parsePdf,
   normalizeCoordinates,
   generateMaskRects,
   groupTextIntoLines,
   groupLinesIntoParagraphs,
-} from './pdfProcessor.js?v=20260318c';
+} from './pdfProcessor.js?v=20260318d';
 import {
   loadImageAsPage,
   createMaskedBackground,
   resizeImage,
   dataUrlToBase64,
   dataUrlToMimeType,
-} from './imageProcessor.js?v=20260318c';
+} from './imageProcessor.js?v=20260318d';
 import {
   performOcr,
   generateCleanBackground,
-} from './openaiClient.js?v=20260318c';
+} from './openaiClient.js?v=20260318d';
 import {
   generatePptx,
   downloadPptx,
-} from './pptGenerator.js?v=20260318c';
+} from './pptGenerator.js?v=20260318d';
 
 // Initialize UI
 const ui = new UIController();
