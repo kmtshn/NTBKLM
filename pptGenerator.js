@@ -1,22 +1,18 @@
 /**
  * pptGenerator.js - PPTX Generation Module
  * 
- * Core Design: 2-Layer Structure
- *   Layer 1: Background image (text removed)
- *   Layer 2: Editable text boxes (positioned with original coordinates)
+ * Core Design: 2-Layer Structure per slide
+ *   Layer 1: Background image (original slide with text removed, or original as-is)
+ *   Layer 2: Editable text boxes (positioned with OCR-detected coordinates)
  * 
  * This ensures the output PPTX is:
- *   - Visually identical to the source
+ *   - Visually close to the source
  *   - Fully editable (text can be selected, modified, copied)
  *   - Properly structured (not just an image paste)
  */
 
 // PptxGenJS is loaded globally via CDN
-// const PptxGenJS = window.PptxGenJS;
 
-/**
- * Slide dimensions in inches for standard sizes.
- */
 const SLIDE_SIZES = {
   '16:9': { width: 13.333, height: 7.5 },
   '4:3':  { width: 10, height: 7.5 },
@@ -25,11 +21,8 @@ const SLIDE_SIZES = {
 /**
  * Generate a PPTX file from processed page data.
  * 
- * @param {Array<ProcessedPage>} pages - Array of processed page data
+ * @param {Array<Object>} pages - Array of processed page data
  * @param {Object} options - Generation options
- * @param {string} options.slideSize - '16:9', '4:3', or 'auto'
- * @param {function} options.onProgress - Progress callback (pageIndex, totalPages)
- * @param {function} options.onLog - Logging callback
  * @returns {Promise<Blob>} PPTX file as Blob
  */
 export async function generatePptx(pages, options = {}) {
@@ -61,7 +54,8 @@ export async function generatePptx(pages, options = {}) {
     addBackgroundLayer(slide, page, dimensions);
 
     // === LAYER 2: Text Boxes ===
-    addTextLayer(slide, page, dimensions, onLog);
+    const placedCount = addTextLayer(slide, page, dimensions, onLog);
+    onLog(`  テキストボックス: ${placedCount}個配置`);
 
     if (onProgress) onProgress(i + 1, pages.length);
   }
@@ -71,12 +65,13 @@ export async function generatePptx(pages, options = {}) {
   // Generate file
   const blob = await pptx.write({ outputType: 'blob' });
 
-  onLog(`PPTX生成完了 (${(blob.size / 1024 / 1024).toFixed(2)} MB)`);
+  const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
+  onLog(`PPTX生成完了 (${sizeMB} MB, ${pages.length}スライド)`);
   return blob;
 }
 
 /**
- * Calculate optimal slide dimensions based on content.
+ * Calculate optimal slide dimensions.
  */
 function calculateSlideDimensions(pages, slideSize) {
   if (slideSize !== 'auto' && SLIDE_SIZES[slideSize]) {
@@ -86,20 +81,27 @@ function calculateSlideDimensions(pages, slideSize) {
   // Auto-detect from first page aspect ratio
   if (pages.length > 0) {
     const page = pages[0];
-    const aspectRatio = page.pdfWidth / page.pdfHeight;
+    let aspectRatio;
 
-    if (aspectRatio > 1.5) {
-      return { ...SLIDE_SIZES['16:9'], label: '16:9 (自動)' };
+    if (page.canvasWidth && page.canvasHeight) {
+      aspectRatio = page.canvasWidth / page.canvasHeight;
+    } else if (page.pdfWidth && page.pdfHeight) {
+      aspectRatio = page.pdfWidth / page.pdfHeight;
+    } else {
+      aspectRatio = 16 / 9;
+    }
+
+    if (aspectRatio > 1.6) {
+      return { ...SLIDE_SIZES['16:9'], label: '16:9 (自動検出)' };
     } else if (aspectRatio > 1.2) {
-      return { ...SLIDE_SIZES['4:3'], label: '4:3 (自動)' };
+      return { ...SLIDE_SIZES['4:3'], label: '4:3 (自動検出)' };
     } else if (aspectRatio < 0.8) {
-      // Portrait - use custom size
+      // Portrait
       const height = 10;
       const width = height * aspectRatio;
-      return { width, height, label: `カスタム (${width.toFixed(1)}:${height.toFixed(1)})` };
+      return { width, height, label: `縦向き (自動)` };
     } else {
-      // Near square
-      return { width: 10, height: 10 / aspectRatio, label: 'カスタム' };
+      return { width: 10, height: 10 / aspectRatio, label: 'カスタム (自動)' };
     }
   }
 
@@ -108,14 +110,13 @@ function calculateSlideDimensions(pages, slideSize) {
 
 /**
  * LAYER 1: Add background image to slide.
- * The background image has text regions removed/inpainted.
  */
 function addBackgroundLayer(slide, page, dimensions) {
-  if (!page.backgroundImageDataUrl) return;
+  const imgSrc = page.backgroundImageDataUrl || page.imageDataUrl;
+  if (!imgSrc) return;
 
-  // Add as full-slide background image
   slide.addImage({
-    data: page.backgroundImageDataUrl,
+    data: imgSrc,
     x: 0,
     y: 0,
     w: dimensions.width,
@@ -130,15 +131,11 @@ function addBackgroundLayer(slide, page, dimensions) {
 
 /**
  * LAYER 2: Add editable text boxes to slide.
- * Each text element is positioned at its original coordinates.
+ * Returns count of placed text boxes.
  */
 function addTextLayer(slide, page, dimensions, onLog) {
   const textBlocks = page.textBlocks || [];
-
-  if (textBlocks.length === 0) {
-    onLog('  テキストブロックなし - 背景のみ');
-    return;
-  }
+  if (textBlocks.length === 0) return 0;
 
   let placedCount = 0;
 
@@ -147,74 +144,74 @@ function addTextLayer(slide, page, dimensions, onLog) {
       addTextBox(slide, block, dimensions);
       placedCount++;
     } catch (err) {
-      onLog(`  テキスト配置エラー: ${err.message}`, 'warn');
+      // Skip individual text box errors silently
     }
   }
 
-  onLog(`  ${placedCount}個のテキストボックスを配置`);
+  return placedCount;
 }
 
 /**
  * Add a single text box to a slide with precise positioning.
- * 
- * @param {Object} slide - PptxGenJS slide object
- * @param {Object} block - Text block with relative coordinates
- * @param {Object} dimensions - Slide dimensions in inches
  */
 function addTextBox(slide, block, dimensions) {
-  // Convert relative coordinates to absolute inches
-  const x = block.relX * dimensions.width;
-  const y = block.relY * dimensions.height;
-  const w = Math.max(block.relWidth * dimensions.width, 0.5); // Minimum width 0.5 inches
-  const h = Math.max(block.relHeight * dimensions.height, 0.2); // Minimum height 0.2 inches
+  // Convert relative coordinates (0-1) to absolute inches
+  const x = clamp(block.relX * dimensions.width, 0, dimensions.width);
+  const y = clamp(block.relY * dimensions.height, 0, dimensions.height);
+  const w = clamp(block.relWidth * dimensions.width, 0.3, dimensions.width - x);
+  const h = clamp(block.relHeight * dimensions.height, 0.15, dimensions.height - y);
 
-  // Calculate font size in points
-  // relFontSize is relative to page height
-  // Convert: relFontSize * slide height (inches) * 72 (points per inch)
-  let fontSize = block.relFontSize * dimensions.height * 72;
-
-  // Clamp font size to reasonable range
-  fontSize = Math.max(6, Math.min(72, fontSize));
-
-  // If we have an explicit fontSize from OCR (in points), prefer it
+  // Font size calculation
+  let fontSize;
   if (block.fontSize && block.fontSize > 0) {
-    // Scale the OCR fontSize relative to original vs slide dimensions
-    const scaleFactor = dimensions.height / (block.originalPageHeight || 792); // 792 = letter height in points
-    fontSize = block.fontSize * scaleFactor;
-    fontSize = Math.max(6, Math.min(72, fontSize));
+    fontSize = block.fontSize;
+  } else {
+    // Estimate from relative height
+    fontSize = block.relFontSize * dimensions.height * 72;
   }
+  fontSize = clamp(fontSize, 6, 72);
+
+  // Parse color
+  let textColor = '000000';
+  if (block.color) {
+    textColor = block.color.replace('#', '');
+    if (textColor.length !== 6) textColor = '000000';
+  }
+
+  // Build text content
+  const text = block.text || '';
+  if (!text.trim()) return;
+
+  // Detect alignment
+  const align = detectAlignment(block, dimensions);
+
+  // Choose font face based on content
+  const fontFace = containsJapanese(text) ? 'Meiryo' : 'Arial';
 
   // Build text options
   const textOptions = {
     x,
     y,
     w,
-    h: h + 0.1, // Add slight extra height to prevent clipping
+    h: h + 0.05,
     fontSize,
-    fontFace: 'Arial',
-    color: '000000',
+    fontFace,
+    color: textColor,
     bold: block.bold || false,
     valign: 'top',
-    align: detectAlignment(block),
+    align,
     wrap: true,
     shrinkText: false,
-    // Make background transparent so Layer 1 shows through
     fill: { color: 'FFFFFF', transparency: 100 },
-    // No border
     line: { width: 0 },
-    // Minimal margins to match positioning
-    margin: [0, 0, 0, 0],
-    // Paragraph spacing
+    margin: [0, 2, 0, 2],
     paraSpaceBefore: 0,
     paraSpaceAfter: 0,
-    lineSpacingMultiple: 1.0,
+    lineSpacingMultiple: 1.1,
   };
 
-  // Handle multi-line text
-  const text = block.text || '';
-
+  // Handle text content (may contain newlines)
   if (text.includes('\n')) {
-    // Multi-line: create text runs for each line
     const lines = text.split('\n');
     const textRuns = [];
 
@@ -226,13 +223,12 @@ function addTextBox(slide, block, dimensions) {
         text: lines[i],
         options: {
           fontSize,
-          fontFace: 'Arial',
-          color: '000000',
+          fontFace,
+          color: textColor,
           bold: block.bold || false,
         }
       });
     }
-
     slide.addText(textRuns, textOptions);
   } else {
     slide.addText(text, textOptions);
@@ -240,20 +236,23 @@ function addTextBox(slide, block, dimensions) {
 }
 
 /**
- * Detect text alignment based on position.
- * Center-aligned text tends to be centered on the page.
- * Right-aligned text tends to be at the right side.
+ * Detect text alignment based on position and type.
  */
-function detectAlignment(block) {
-  const centerX = block.relX + block.relWidth / 2;
+function detectAlignment(block, dimensions) {
+  // If block has explicit type info
+  if (block.type === 'heading') {
+    const centerX = block.relX + block.relWidth / 2;
+    if (Math.abs(centerX - 0.5) < 0.15) return 'center';
+  }
 
-  // If the text block is narrow and centered
-  if (block.relWidth < 0.4 && Math.abs(centerX - 0.5) < 0.1) {
+  // If centered horizontally on the slide
+  const centerX = block.relX + block.relWidth / 2;
+  if (block.relWidth < 0.5 && Math.abs(centerX - 0.5) < 0.08) {
     return 'center';
   }
 
   // If text starts far right
-  if (block.relX > 0.6 && block.relWidth < 0.35) {
+  if (block.relX > 0.65 && block.relWidth < 0.3) {
     return 'right';
   }
 
@@ -261,10 +260,21 @@ function detectAlignment(block) {
 }
 
 /**
+ * Check if text contains Japanese characters.
+ */
+function containsJapanese(text) {
+  return /[\u3000-\u30FF\u4E00-\u9FFF\uFF00-\uFFEF]/.test(text);
+}
+
+/**
+ * Clamp a value between min and max.
+ */
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
  * Trigger download of the generated PPTX blob.
- * 
- * @param {Blob} blob - PPTX file blob
- * @param {string} filename - Download filename
  */
 export function downloadPptx(blob, filename = 'converted.pptx') {
   const url = URL.createObjectURL(blob);
@@ -274,7 +284,5 @@ export function downloadPptx(blob, filename = 'converted.pptx') {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-
-  // Revoke after a delay to ensure download starts
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }

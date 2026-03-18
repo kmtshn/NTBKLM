@@ -846,9 +846,9 @@
           <div class="drop-zone" id="dropZone">
             <div class="drop-zone-icon">📄</div>
             <div class="drop-zone-text">ファイルをドラッグ＆ドロップ</div>
-            <div class="drop-zone-hint">PDF または 画像ファイル（PNG, JPG, WEBP）に対応</div>
+            <div class="drop-zone-hint">PPTX, PDF, 画像ファイル（PNG, JPG, WEBP）に対応</div>
           </div>
-          <input type="file" id="fileInput" class="file-input" accept=".pdf,.png,.jpg,.jpeg,.webp">
+          <input type="file" id="fileInput" class="file-input" accept=".pptx,.pdf,.png,.jpg,.jpeg,.webp">
 
           <div class="file-info" id="fileInfo">
             <span>📎</span>
@@ -987,6 +987,7 @@
   <div class="toast-container" id="toastContainer"></div>
 
   <!-- External Libraries (CDN for GitHub Pages) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script>
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
