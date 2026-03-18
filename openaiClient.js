@@ -170,7 +170,7 @@ IMPORTANT RULES:
         model: 'gpt-image-1',
         prompt: prompt,
         image: imageDataUrl,
-        size: '1536x1024',
+        size: 'auto',
         quality: 'medium',
       };
 
