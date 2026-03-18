@@ -1,16 +1,19 @@
 /**
- * openaiClient.js - OpenAI API Integration Module
+ * openaiClient.js - API Integration Module
  * 
  * Handles:
  * - Structured OCR via GPT-4o vision (optimized for Japanese business documents)
- * - AI background generation via GPT Image API (text removal from slides)
+ * - AI background generation via Cloudflare Workers proxy (gpt-image-1)
  * - API error handling, retries, and rate limiting
+ * 
+ * Image generation is routed through a Cloudflare Workers endpoint
+ * so no OpenAI API key is exposed in front-end code for that call.
+ * OCR still uses the OpenAI Chat Completions API directly.
  */
 
 const CHAT_API_URL = 'https://api.openai.com/v1/chat/completions';
-const RESPONSES_API_URL = 'https://api.openai.com/v1/responses';
+const WORKERS_IMAGE_URL = 'https://ntbklm-api.kamata-shun-oki.workers.dev';
 const VISION_MODEL = 'gpt-4o';
-const IMAGE_GEN_MODEL = 'gpt-4o';
 
 /**
  * Perform comprehensive OCR on a slide image.
@@ -120,25 +123,27 @@ CRITICAL RULES:
 }
 
 /**
- * Generate a text-free background image using OpenAI Responses API.
+ * Generate a text-free background image via Cloudflare Workers proxy.
  * 
- * Uses the Responses API with gpt-4o and the image_generation tool.
- * Sends the original slide image as input and asks the model to
- * reproduce the slide's visual design but with ALL text removed.
+ * Uses OpenAI's /v1/images/edits endpoint (proxied through Workers).
+ * The original slide image is sent as a reference so gpt-image-1 can
+ * see the actual design and reproduce it WITHOUT text.
  * 
- * This approach uses the same API access as the OCR (Chat/Responses),
- * avoiding the 403 errors that can occur with the Images API endpoint.
+ * Workers handles the OpenAI API key server-side — NO api key or
+ * Authorization header is sent from the browser.
  * 
- * @param {string} apiKey - OpenAI API key
- * @param {string} imageBase64 - Base64 encoded image (PNG or JPEG)
+ * Request:  POST { model, prompt, image, size } -> Workers -> OpenAI /v1/images/edits
+ * Response: { data: [{ b64_json: "..." }] }
+ * 
+ * @param {string} imageBase64 - Base64 encoded original slide image
  * @param {string} mimeType - MIME type of the image ('image/png' or 'image/jpeg')
  * @param {function} onLog - Logging callback
  * @returns {Promise<string>} Data URL of the generated background image
  */
-export async function generateCleanBackground(apiKey, imageBase64, mimeType = 'image/png', onLog = () => {}) {
-  onLog('AI画像生成で背景を作成中（テキスト除去）...');
+export async function generateCleanBackground(imageBase64, mimeType = 'image/png', onLog = () => {}) {
+  onLog('AI画像編集で背景を作成中（元画像参照 → テキスト除去）...');
 
-  const prompt = `Look at this presentation slide image carefully. 
+  const prompt = `Look at this presentation slide image carefully.
 Reproduce the EXACT same image but with ALL text completely removed.
 
 IMPORTANT RULES:
@@ -152,45 +157,27 @@ IMPORTANT RULES:
 - Maintain the same aspect ratio and overall composition
 - The background areas where text was removed should blend seamlessly`;
 
-  const dataUrlPrefix = mimeType === 'image/png' ? 'data:image/png;base64,' : 'data:image/jpeg;base64,';
+  // Build the data URL for the source image
+  const imageDataUrl = `data:${mimeType};base64,${imageBase64}`;
 
   let lastError;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      onLog(`  Responses API画像生成呼び出し中... (試行 ${attempt}/3)`);
+      onLog(`  Workers API画像編集呼び出し中... (試行 ${attempt}/3)`);
 
       const requestBody = {
-        model: IMAGE_GEN_MODEL,
-        input: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'input_text',
-                text: prompt,
-              },
-              {
-                type: 'input_image',
-                image_url: `${dataUrlPrefix}${imageBase64}`,
-              },
-            ],
-          },
-        ],
-        tools: [
-          {
-            type: 'image_generation',
-            quality: 'medium',
-            size: 'auto',
-          },
-        ],
+        model: 'gpt-image-1',
+        prompt: prompt,
+        image: imageDataUrl,
+        size: '1536x1024',
+        quality: 'medium',
       };
 
-      const response = await fetch(RESPONSES_API_URL, {
+      const response = await fetch(WORKERS_IMAGE_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify(requestBody),
       });
@@ -200,13 +187,9 @@ IMPORTANT RULES:
         let errorMsg;
         try {
           const errorJson = JSON.parse(errorBody);
-          errorMsg = errorJson.error?.message || errorBody;
+          errorMsg = errorJson.error?.message || errorJson.error || errorBody;
         } catch {
           errorMsg = errorBody;
-        }
-
-        if (response.status === 401 || response.status === 403) {
-          throw new Error(`認証エラー (${response.status}): APIキーを確認してください。`);
         }
 
         if (response.status === 429) {
@@ -217,47 +200,24 @@ IMPORTANT RULES:
           continue;
         }
 
-        throw new Error(`Responses API error (${response.status}): ${errorMsg}`);
+        throw new Error(`Workers API error (${response.status}): ${errorMsg}`);
       }
 
       const result = await response.json();
 
-      // Extract image from Responses API output
-      // The output array contains items; look for image_generation_call type
-      const imageOutput = result.output?.find(
-        item => item.type === 'image_generation_call' && item.result
-      );
+      // Workers response format: { data: [{ b64_json: "..." }] }
+      const b64Json = result.data?.[0]?.b64_json;
 
-      if (imageOutput && imageOutput.result) {
-        const base64Data = imageOutput.result;
-        const dataUrl = `data:image/png;base64,${base64Data}`;
-
-        // Log token usage if available
-        if (result.usage) {
-          const inputTokens = result.usage.input_tokens || 0;
-          const outputTokens = result.usage.output_tokens || 0;
-          onLog(`  画像生成完了 (入力: ${inputTokens}トークン, 出力: ${outputTokens}トークン)`);
-        } else {
-          onLog('  AI背景画像生成完了', 'success');
-        }
-
+      if (b64Json) {
+        const dataUrl = `data:image/png;base64,${b64Json}`;
+        onLog('  AI背景画像生成完了（元画像ベース）', 'success');
         return dataUrl;
       }
 
-      // Check if there's text output explaining why no image was generated
-      const textOutput = result.output?.find(
-        item => item.type === 'message' && item.content
-      );
-      if (textOutput) {
-        const textContent = textOutput.content?.map(c => c.text).join('') || '';
-        throw new Error(`画像生成失敗: ${textContent.substring(0, 200)}`);
-      }
-
-      throw new Error('画像データが応答に含まれていません');
+      throw new Error('画像データが応答に含まれていません (data[0].b64_json が見つかりません)');
 
     } catch (err) {
       lastError = err;
-      if (err.message.includes('認証エラー')) throw err;
       if (attempt < 3) {
         onLog(`  リトライ中... (${err.message})`, 'warn');
         await sleep(attempt * 3000);

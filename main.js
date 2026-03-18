@@ -25,36 +25,36 @@
  *     4. Generate 2-layer PPTX slide
  * 
  * Background Strategy:
- *   - PRIMARY: AI background generation (gpt-image-1) - creates a new image
- *     that looks like the original slide but with all text removed
+ *   - PRIMARY: AI background generation via Cloudflare Workers (gpt-image-1)
+ *     - No API key needed in the browser; Workers handles auth server-side
  *   - FALLBACK: Local Canvas masking (edge-color fill) - used only when
- *     AI generation fails or API key is unavailable
+ *     AI generation fails
  */
 
-import { UIController } from './ui.js?v=20260318b';
-import { parsePptx } from './pptxParser.js?v=20260318b';
+import { UIController } from './ui.js?v=20260318d';
+import { parsePptx } from './pptxParser.js?v=20260318d';
 import {
   parsePdf,
   normalizeCoordinates,
   generateMaskRects,
   groupTextIntoLines,
   groupLinesIntoParagraphs,
-} from './pdfProcessor.js?v=20260318b';
+} from './pdfProcessor.js?v=20260318d';
 import {
   loadImageAsPage,
   createMaskedBackground,
   resizeImage,
   dataUrlToBase64,
   dataUrlToMimeType,
-} from './imageProcessor.js?v=20260318b';
+} from './imageProcessor.js?v=20260318d';
 import {
   performOcr,
   generateCleanBackground,
-} from './openaiClient.js?v=20260318b';
+} from './openaiClient.js?v=20260318d';
 import {
   generatePptx,
   downloadPptx,
-} from './pptGenerator.js?v=20260318b';
+} from './pptGenerator.js?v=20260318d';
 
 // Initialize UI
 const ui = new UIController();
@@ -166,28 +166,24 @@ async function startConversion() {
 // ======================================================================
 
 /**
- * Generate a clean background image using AI, with local fallback.
+ * Generate a clean background image using AI (Cloudflare Workers), with local fallback.
  * 
- * @param {string} apiKey - OpenAI API key
+ * No API key is needed — the Workers endpoint handles OpenAI auth server-side.
+ * 
  * @param {string} imageDataUrl - Original image data URL
  * @param {HTMLCanvasElement|null} canvas - Canvas element for local fallback
  * @param {Array} ocrItems - OCR items for local fallback mask rects
  * @param {function} log - Logging callback
  * @returns {Promise<string>} Background image data URL
  */
-async function generateBackground(apiKey, imageDataUrl, canvas, ocrItems, log) {
-  if (!apiKey) {
-    log('  APIキーなし：ローカルマスキングで背景生成');
-    return localFallbackBackground(canvas, ocrItems, log);
-  }
-
+async function generateBackground(imageDataUrl, canvas, ocrItems, log) {
   try {
     // Resize image for API (gpt-image-1 accepts up to 50MB but smaller = faster)
     const resized = await resizeImage(imageDataUrl, 2048, 2048, 'image/png', 1.0);
     const base64 = dataUrlToBase64(resized);
     const mimeType = dataUrlToMimeType(resized);
 
-    const bgDataUrl = await generateCleanBackground(apiKey, base64, mimeType, log);
+    const bgDataUrl = await generateCleanBackground(base64, mimeType, log);
     return bgDataUrl;
   } catch (err) {
     log(`  AI背景生成失敗: ${err.message}`, 'warn');
@@ -280,7 +276,7 @@ async function processSlideWithText(slide, apiKey, log) {
   // Background generation: AI-based
   ui.setStepStatus('background', 'active');
   const backgroundImageDataUrl = await generateBackground(
-    apiKey, slide.imageDataUrl, slide.canvas, normalizedItems, log
+    slide.imageDataUrl, slide.canvas, normalizedItems, log
   );
   ui.setStepStatus('background', 'completed');
 
@@ -328,11 +324,11 @@ async function processSlideWithOcr(slide, apiKey, log) {
   }
   ui.setStepStatus('normalize', 'completed');
 
-  // STEP: Background generation (AI-based)
+  // STEP: Background generation (AI-based via Workers)
   ui.setStepStatus('background', 'active');
   log('  AI背景画像を生成中...');
   const backgroundImageDataUrl = await generateBackground(
-    apiKey, slide.imageDataUrl, slide.canvas, ocrItems, log
+    slide.imageDataUrl, slide.canvas, ocrItems, log
   );
   ui.setStepStatus('background', 'completed');
 
@@ -401,10 +397,10 @@ async function processPdf(file, dpiScale, apiKey, log) {
       if (i === 0) ui.setStepStatus('mask', 'completed');
       ui.setProgress(baseProgress + 10);
 
-      // Background - AI generation
+      // Background - AI generation (via Workers)
       if (i === 0) ui.setStepStatus('background', 'active');
       const backgroundImageDataUrl = await generateBackground(
-        apiKey, page.imageDataUrl, page.canvas, normalizedItems, log
+        page.imageDataUrl, page.canvas, normalizedItems, log
       );
       if (i === 0) ui.setStepStatus('background', 'completed');
       ui.setProgress(baseProgress + 30);
@@ -454,10 +450,10 @@ async function processPdf(file, dpiScale, apiKey, log) {
       }
       if (i === 0) ui.setStepStatus('normalize', 'completed');
 
-      // Background - AI generation
+      // Background - AI generation (via Workers)
       if (i === 0) ui.setStepStatus('background', 'active');
       const backgroundImageDataUrl = await generateBackground(
-        apiKey, page.imageDataUrl, page.canvas, ocrItems, log
+        page.imageDataUrl, page.canvas, ocrItems, log
       );
       if (i === 0) ui.setStepStatus('background', 'completed');
 
@@ -522,7 +518,7 @@ async function processImage(file, apiKey, log) {
   ui.setStepStatus('background', 'active');
   log('AI背景画像を生成中...');
   const backgroundImageDataUrl = await generateBackground(
-    apiKey, page.imageDataUrl, page.canvas, ocrItems, log
+    page.imageDataUrl, page.canvas, ocrItems, log
   );
   ui.setStepStatus('background', 'completed');
   ui.setProgress(60);
