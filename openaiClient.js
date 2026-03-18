@@ -3,12 +3,14 @@
  * 
  * Handles:
  * - Structured OCR via GPT-4o vision (optimized for Japanese business documents)
- * - Text region detection for background masking
+ * - AI background generation via GPT Image API (text removal from slides)
  * - API error handling, retries, and rate limiting
  */
 
-const API_URL = 'https://api.openai.com/v1/chat/completions';
+const CHAT_API_URL = 'https://api.openai.com/v1/chat/completions';
+const IMAGE_EDIT_API_URL = 'https://api.openai.com/v1/images/edits';
 const VISION_MODEL = 'gpt-4o';
+const IMAGE_MODEL = 'gpt-image-1';
 
 /**
  * Perform comprehensive OCR on a slide image.
@@ -118,66 +120,119 @@ CRITICAL RULES:
 }
 
 /**
- * Detect text regions for masking (more aggressive detection for background generation).
+ * Generate a text-free background image using OpenAI Image Edit API.
+ * 
+ * Sends the original slide image to gpt-image-1 with a prompt to
+ * reproduce the slide's visual design but with ALL text removed.
+ * The result is a brand-new image that preserves the layout, colors,
+ * shapes, icons, and overall visual feel — but without any text.
  * 
  * @param {string} apiKey - OpenAI API key
- * @param {string} imageBase64 - Base64 encoded image
+ * @param {string} imageBase64 - Base64 encoded image (PNG or JPEG)
+ * @param {string} mimeType - MIME type of the image ('image/png' or 'image/jpeg')
  * @param {function} onLog - Logging callback
- * @returns {Promise<Array|null>} Array of text region bounding boxes or null
+ * @returns {Promise<string>} Data URL of the generated background image
  */
-export async function detectTextRegions(apiKey, imageBase64, onLog = () => {}) {
-  try {
-    onLog('テキスト領域を検出中...');
+export async function generateCleanBackground(apiKey, imageBase64, mimeType = 'image/png', onLog = () => {}) {
+  onLog('AI画像生成で背景を作成中（テキスト除去）...');
 
-    const response = await callVisionApi(apiKey, [
-      {
-        role: 'system',
-        content: `Analyze this image and identify ALL regions containing text.
-Return a JSON array of bounding boxes. Each box:
-{"x": <left 0-1>, "y": <top 0-1>, "width": <0-1>, "height": <0-1>}
-Coordinates are relative to image dimensions (0.0 to 1.0).
-Include ALL text: titles, body, labels, numbers, watermarks, small text.
-Be generous with bounding box sizes - it's better to include extra padding.
-Return ONLY the JSON array.`
-      },
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: 'Identify all text regions. Return JSON array of bounding boxes.'
-          },
-          {
-            type: 'image_url',
-            image_url: { url: `data:image/jpeg;base64,${imageBase64}`, detail: 'high' }
-          }
-        ]
+  const prompt = `Look at this presentation slide image carefully. 
+Reproduce the EXACT same image but with ALL text completely removed.
+
+IMPORTANT RULES:
+- Keep the exact same layout, background colors, gradients, patterns
+- Keep all icons, logos, images, diagrams, shapes, lines, borders
+- Keep the exact same color scheme and visual style
+- Remove ALL text characters (Japanese, English, numbers, symbols used as labels)
+- Where text was, fill naturally with the surrounding background color/pattern
+- The result should look like a clean template/background ready for new text overlay
+- Do NOT add any new elements, watermarks, or text
+- Maintain the same aspect ratio and overall composition
+- The background areas where text was removed should blend seamlessly`;
+
+  // Convert base64 to Blob for FormData
+  const imageBlob = base64ToBlob(imageBase64, mimeType);
+  const ext = mimeType === 'image/png' ? 'png' : 'jpg';
+
+  // Determine best output size based on aspect ratio
+  // gpt-image-1 supports: 1024x1024, 1024x1536, 1536x1024, auto
+  const size = 'auto';
+
+  const formData = new FormData();
+  formData.append('model', IMAGE_MODEL);
+  formData.append('image', imageBlob, `slide.${ext}`);
+  formData.append('prompt', prompt);
+  formData.append('size', size);
+  formData.append('quality', 'high');
+
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      onLog(`  画像生成API呼び出し中... (試行 ${attempt}/3)`);
+
+      const response = await fetch(IMAGE_EDIT_API_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        let errorMsg;
+        try {
+          const errorJson = JSON.parse(errorBody);
+          errorMsg = errorJson.error?.message || errorBody;
+        } catch {
+          errorMsg = errorBody;
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          throw new Error(`認証エラー (${response.status}): APIキーを確認してください。`);
+        }
+
+        if (response.status === 429) {
+          const waitTime = attempt * 10000;
+          onLog(`  レート制限。${waitTime / 1000}秒待機中...`, 'warn');
+          await sleep(waitTime);
+          lastError = new Error(`レート制限 (429): ${errorMsg}`);
+          continue;
+        }
+
+        throw new Error(`Image API error (${response.status}): ${errorMsg}`);
       }
-    ], 2048);
 
-    const text = response.choices[0].message.content.trim();
-    const jsonStr = extractJson(text);
-    const regions = JSON.parse(jsonStr);
+      const result = await response.json();
 
-    if (Array.isArray(regions) && regions.length > 0) {
-      // Validate and add padding
-      const validated = regions
-        .filter(r => typeof r.x === 'number' && typeof r.y === 'number')
-        .map(r => ({
-          x: clamp(r.x - 0.01, 0, 1),
-          y: clamp(r.y - 0.01, 0, 1),
-          width: clamp((r.width || 0.1) + 0.02, 0.01, 1),
-          height: clamp((r.height || 0.03) + 0.02, 0.01, 1),
-        }));
+      if (result.data && result.data.length > 0 && result.data[0].b64_json) {
+        const base64Data = result.data[0].b64_json;
+        const dataUrl = `data:image/png;base64,${base64Data}`;
 
-      onLog(`${validated.length}個のテキスト領域を検出`);
-      return validated;
+        // Log token usage if available
+        if (result.usage) {
+          onLog(`  画像生成完了 (入力: ${result.usage.input_tokens}トークン, 出力: ${result.usage.output_tokens}トークン)`);
+        } else {
+          onLog('  AI背景画像生成完了', 'success');
+        }
+
+        return dataUrl;
+      }
+
+      throw new Error('画像データが応答に含まれていません');
+
+    } catch (err) {
+      lastError = err;
+      if (err.message.includes('認証エラー')) throw err;
+      if (attempt < 3) {
+        onLog(`  リトライ中... (${err.message})`, 'warn');
+        await sleep(attempt * 3000);
+      }
     }
-    return null;
-  } catch (err) {
-    onLog(`テキスト領域検出に失敗: ${err.message}`, 'warn');
-    return null;
   }
+
+  throw lastError;
 }
 
 /**
@@ -189,7 +244,7 @@ async function callVisionApi(apiKey, messages, maxTokens = 4096, maxRetries = 3)
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const response = await fetch(API_URL, {
+      const response = await fetch(CHAT_API_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -239,6 +294,21 @@ async function callVisionApi(apiKey, messages, maxTokens = 4096, maxRetries = 3)
   }
 
   throw lastError;
+}
+
+/**
+ * Convert a base64 string to a Blob.
+ * @param {string} base64 - Base64 encoded data
+ * @param {string} mimeType - MIME type
+ * @returns {Blob}
+ */
+function base64ToBlob(base64, mimeType = 'image/png') {
+  const binaryStr = atob(base64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
 }
 
 /**

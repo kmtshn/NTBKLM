@@ -4,25 +4,31 @@
  * Unified conversion pipeline for 3 input types:
  * 
  *   PPTX Input (image-only slides):
- *     1. Parse PPTX (JSZip) → extract slide images
+ *     1. Parse PPTX (JSZip) -> extract slide images
  *     2. For each slide image:
- *        a. OCR via GPT-4o Vision → text items with coordinates
- *        b. Generate masked background (text removed)
+ *        a. OCR via GPT-4o Vision -> text items with coordinates
+ *        b. Generate clean background via GPT Image API (text removed)
  *        c. Generate 2-layer PPTX slide
  * 
  *   PDF Input:
- *     1. Parse PDF (PDF.js) → render to Canvas + extract text
+ *     1. Parse PDF (PDF.js) -> render to Canvas + extract text
  *     2. For each page:
- *        a. If PDF has text → use PDF.js text data
- *        b. If PDF has no text (scanned) → OCR via GPT-4o Vision
- *        c. Generate masked background
+ *        a. If PDF has text -> use PDF.js text data
+ *        b. If PDF has no text (scanned) -> OCR via GPT-4o Vision
+ *        c. Generate clean background via GPT Image API
  *        d. Generate 2-layer PPTX slide
  * 
  *   Image Input:
- *     1. Load image → Canvas
- *     2. OCR via GPT-4o Vision → text items
- *     3. Generate masked background
+ *     1. Load image -> Canvas
+ *     2. OCR via GPT-4o Vision -> text items
+ *     3. Generate clean background via GPT Image API
  *     4. Generate 2-layer PPTX slide
+ * 
+ * Background Strategy:
+ *   - PRIMARY: AI background generation (gpt-image-1) - creates a new image
+ *     that looks like the original slide but with all text removed
+ *   - FALLBACK: Local Canvas masking (edge-color fill) - used only when
+ *     AI generation fails or API key is unavailable
  */
 
 import { UIController } from './ui.js';
@@ -39,10 +45,11 @@ import {
   createMaskedBackground,
   resizeImage,
   dataUrlToBase64,
+  dataUrlToMimeType,
 } from './imageProcessor.js';
 import {
   performOcr,
-  detectTextRegions,
+  generateCleanBackground,
 } from './openaiClient.js';
 import {
   generatePptx,
@@ -82,7 +89,7 @@ async function startConversion() {
   const isPdf = file.type === 'application/pdf';
   const isImage = file.type.startsWith('image/');
 
-  // PPTX and Image inputs always require OCR → API key required
+  // PPTX and Image inputs always require OCR -> API key required
   if ((isPptx || isImage) && !apiKey) {
     ui.showToast('PPTX・画像ファイルの変換にはOpenAI APIキーが必要です（OCR処理のため）。APIキーを保存してから再度お試しください。', 'error', 8000);
     return;
@@ -101,7 +108,6 @@ async function startConversion() {
 
   const slideSize = ui.getSlideSize();
   const dpiScale = ui.getDpiScale();
-  const useInpainting = ui.getUseInpainting() && !!apiKey;
 
   const log = (msg, level) => ui.log(msg, level);
 
@@ -109,11 +115,11 @@ async function startConversion() {
     let pages;
 
     if (isPptx) {
-      pages = await processPptx(file, apiKey, useInpainting, log);
+      pages = await processPptx(file, apiKey, log);
     } else if (isPdf) {
-      pages = await processPdf(file, dpiScale, apiKey, useInpainting, log);
+      pages = await processPdf(file, dpiScale, apiKey, log);
     } else if (isImage) {
-      pages = await processImage(file, apiKey, useInpainting, log);
+      pages = await processImage(file, apiKey, log);
     } else {
       throw new Error('サポートされていないファイル形式です');
     }
@@ -156,10 +162,66 @@ async function startConversion() {
 }
 
 // ======================================================================
+// AI Background Generation (shared helper)
+// ======================================================================
+
+/**
+ * Generate a clean background image using AI, with local fallback.
+ * 
+ * @param {string} apiKey - OpenAI API key
+ * @param {string} imageDataUrl - Original image data URL
+ * @param {HTMLCanvasElement|null} canvas - Canvas element for local fallback
+ * @param {Array} ocrItems - OCR items for local fallback mask rects
+ * @param {function} log - Logging callback
+ * @returns {Promise<string>} Background image data URL
+ */
+async function generateBackground(apiKey, imageDataUrl, canvas, ocrItems, log) {
+  if (!apiKey) {
+    log('  APIキーなし：ローカルマスキングで背景生成');
+    return localFallbackBackground(canvas, ocrItems, log);
+  }
+
+  try {
+    // Resize image for API (gpt-image-1 accepts up to 50MB but smaller = faster)
+    const resized = await resizeImage(imageDataUrl, 2048, 2048, 'image/png', 1.0);
+    const base64 = dataUrlToBase64(resized);
+    const mimeType = dataUrlToMimeType(resized);
+
+    const bgDataUrl = await generateCleanBackground(apiKey, base64, mimeType, log);
+    return bgDataUrl;
+  } catch (err) {
+    log(`  AI背景生成失敗: ${err.message}`, 'warn');
+    log('  ローカルマスキングにフォールバック...', 'warn');
+    return localFallbackBackground(canvas, ocrItems, log);
+  }
+}
+
+/**
+ * Local fallback: create background using Canvas edge-color fill.
+ */
+function localFallbackBackground(canvas, ocrItems, log) {
+  if (!canvas || !ocrItems || ocrItems.length === 0) {
+    if (canvas) return canvas.toDataURL('image/png');
+    return null;
+  }
+
+  const maskRects = ocrItems.map(item => ({
+    x: (item.relX || item.x || 0) * canvas.width,
+    y: (item.relY || item.y || 0) * canvas.height,
+    width: (item.relWidth || item.width || 0.1) * canvas.width,
+    height: (item.relHeight || item.height || 0.03) * canvas.height,
+  }));
+
+  const bg = createMaskedBackground(canvas, maskRects);
+  log('  ローカルマスキングで背景生成完了');
+  return bg;
+}
+
+// ======================================================================
 // PPTX Processing Pipeline
 // ======================================================================
 
-async function processPptx(file, apiKey, useInpainting, log) {
+async function processPptx(file, apiKey, log) {
   // STEP 1: Parse PPTX
   ui.setStepStatus('parse', 'active');
   log('PPTX解析を開始...');
@@ -179,20 +241,19 @@ async function processPptx(file, apiKey, useInpainting, log) {
     const baseProgress = 10 + (i / slides.length) * 75;
     log(`--- スライド ${i + 1}/${slides.length} ---`);
 
-    // If slide already has embedded text, use it
-    if (slide.hasEmbeddedText && slide.rawTextItems.length > 5) {
+    // Image-only slide -> OCR required (most PPTX cases with Galaxy-type files)
+    if (!slide.imageDataUrl) {
+      log(`  スライド ${i + 1}: 画像なし、スキップ`, 'warn');
+      continue;
+    }
+
+    if (slide.hasEmbeddedText && slide.rawTextItems && slide.rawTextItems.length > 5) {
       log(`  埋め込みテキスト使用: ${slide.rawTextItems.length}要素`);
-      const page = await processSlideWithText(slide, useInpainting, apiKey, log);
+      const page = await processSlideWithText(slide, apiKey, log);
       processedPages.push(page);
     } else {
-      // Image-only slide → OCR required
-      if (!slide.imageDataUrl) {
-        log(`  スライド ${i + 1}: 画像なし、スキップ`, 'warn');
-        continue;
-      }
-
-      log(`  画像ベーススライド → OCR実行`);
-      const page = await processSlideWithOcr(slide, apiKey, useInpainting, log);
+      log(`  画像ベーススライド → OCR + AI背景生成`);
+      const page = await processSlideWithOcr(slide, apiKey, log);
       processedPages.push(page);
     }
 
@@ -213,23 +274,15 @@ async function processPptx(file, apiKey, useInpainting, log) {
 /**
  * Process a PPTX slide that has embedded text.
  */
-async function processSlideWithText(slide, useInpainting, apiKey, log) {
-  const normalizedItems = slide.rawTextItems; // Already normalized in pptxParser
+async function processSlideWithText(slide, apiKey, log) {
+  const normalizedItems = slide.rawTextItems;
 
-  // Generate mask rects from text items
-  const maskRects = normalizedItems.map(item => ({
-    x: item.relX * slide.canvasWidth,
-    y: item.relY * slide.canvasHeight,
-    width: item.relWidth * slide.canvasWidth,
-    height: item.relHeight * slide.canvasHeight,
-  }));
-
-  // Background generation
-  let backgroundImageDataUrl = slide.imageDataUrl;
-  if (slide.canvas && maskRects.length > 0) {
-    backgroundImageDataUrl = createMaskedBackground(slide.canvas, maskRects);
-    log(`  ローカルマスキングで背景生成`);
-  }
+  // Background generation: AI-based
+  ui.setStepStatus('background', 'active');
+  const backgroundImageDataUrl = await generateBackground(
+    apiKey, slide.imageDataUrl, slide.canvas, normalizedItems, log
+  );
+  ui.setStepStatus('background', 'completed');
 
   // Build text blocks
   const textBlocks = normalizedItems.map(item => ({
@@ -255,10 +308,10 @@ async function processSlideWithText(slide, useInpainting, apiKey, log) {
 /**
  * Process a PPTX slide that is image-only (requires OCR).
  */
-async function processSlideWithOcr(slide, apiKey, useInpainting, log) {
-  // Resize image for API (max 2048px, JPEG for smaller payload)
-  const resized = await resizeImage(slide.imageDataUrl, 2048, 2048, 'image/jpeg', 0.90);
-  const imageBase64 = dataUrlToBase64(resized);
+async function processSlideWithOcr(slide, apiKey, log) {
+  // Resize image for OCR API
+  const resizedForOcr = await resizeImage(slide.imageDataUrl, 2048, 2048, 'image/jpeg', 0.90);
+  const imageBase64 = dataUrlToBase64(resizedForOcr);
 
   // STEP: OCR
   ui.setStepStatus('normalize', 'active');
@@ -267,7 +320,6 @@ async function processSlideWithOcr(slide, apiKey, useInpainting, log) {
     ocrItems = await performOcr(apiKey, imageBase64, log);
   } catch (err) {
     log(`  OCR失敗: ${err.message}`, 'error');
-    // Return page with just the background image (no text layer)
     return {
       ...slide,
       backgroundImageDataUrl: slide.imageDataUrl,
@@ -276,50 +328,16 @@ async function processSlideWithOcr(slide, apiKey, useInpainting, log) {
   }
   ui.setStepStatus('normalize', 'completed');
 
-  // STEP: Generate mask from OCR results
-  ui.setStepStatus('mask', 'active');
-  const maskRects = ocrItems.map(item => ({
-    x: item.relX * slide.canvasWidth,
-    y: item.relY * slide.canvasHeight,
-    width: item.relWidth * slide.canvasWidth,
-    height: item.relHeight * slide.canvasHeight,
-  }));
-  ui.setStepStatus('mask', 'completed');
-
-  // STEP: Background generation
+  // STEP: Background generation (AI-based)
   ui.setStepStatus('background', 'active');
-  let backgroundImageDataUrl;
-
-  if (useInpainting && apiKey) {
-    try {
-      const textRegions = await detectTextRegions(apiKey, imageBase64, log);
-      if (textRegions && textRegions.length > 0) {
-        const refinedMaskRects = textRegions.map(r => ({
-          x: r.x * slide.canvasWidth,
-          y: r.y * slide.canvasHeight,
-          width: r.width * slide.canvasWidth,
-          height: r.height * slide.canvasHeight,
-        }));
-        const allRects = [...maskRects, ...refinedMaskRects];
-        backgroundImageDataUrl = createMaskedBackground(slide.canvas, allRects);
-        log(`  AI支援テキスト除去完了`, 'success');
-      } else {
-        backgroundImageDataUrl = createMaskedBackground(slide.canvas, maskRects);
-        log(`  ローカルマスキングで背景生成`);
-      }
-    } catch (err) {
-      log(`  AI背景生成失敗、フォールバック: ${err.message}`, 'warn');
-      backgroundImageDataUrl = createMaskedBackground(slide.canvas, maskRects);
-    }
-  } else {
-    backgroundImageDataUrl = createMaskedBackground(slide.canvas, maskRects);
-    log(`  ローカルマスキングで背景生成`);
-  }
+  log('  AI背景画像を生成中...');
+  const backgroundImageDataUrl = await generateBackground(
+    apiKey, slide.imageDataUrl, slide.canvas, ocrItems, log
+  );
   ui.setStepStatus('background', 'completed');
 
   // STEP: Structure text
   ui.setStepStatus('structure', 'active');
-  // OCR items are already structured, use directly as text blocks
   const textBlocks = ocrItems.map(item => ({
     text: item.text,
     relX: item.relX,
@@ -347,7 +365,7 @@ async function processSlideWithOcr(slide, apiKey, useInpainting, log) {
 // PDF Processing Pipeline
 // ======================================================================
 
-async function processPdf(file, dpiScale, apiKey, useInpainting, log) {
+async function processPdf(file, dpiScale, apiKey, log) {
   // STEP 1: Parse PDF
   ui.setStepStatus('parse', 'active');
   log('PDF解析を開始...');
@@ -380,40 +398,14 @@ async function processPdf(file, dpiScale, apiKey, useInpainting, log) {
       ui.setProgress(baseProgress + 5);
 
       if (i === 0) ui.setStepStatus('mask', 'active');
-      const maskRects = generateMaskRects(page.rawTextItems, page.dpiScale, 3);
       if (i === 0) ui.setStepStatus('mask', 'completed');
       ui.setProgress(baseProgress + 10);
 
-      // Background
+      // Background - AI generation
       if (i === 0) ui.setStepStatus('background', 'active');
-      let backgroundImageDataUrl;
-
-      if (useInpainting && apiKey) {
-        try {
-          const resized = await resizeImage(page.imageDataUrl, 2048, 2048, 'image/jpeg', 0.90);
-          const imageBase64 = dataUrlToBase64(resized);
-          const textRegions = await detectTextRegions(apiKey, imageBase64, log);
-
-          if (textRegions && textRegions.length > 0) {
-            const refinedMaskRects = textRegions.map(r => ({
-              x: r.x * page.canvasWidth,
-              y: r.y * page.canvasHeight,
-              width: r.width * page.canvasWidth,
-              height: r.height * page.canvasHeight,
-            }));
-            backgroundImageDataUrl = createMaskedBackground(page.canvas, [...maskRects, ...refinedMaskRects]);
-            log(`  AI支援テキスト除去完了`, 'success');
-          } else {
-            backgroundImageDataUrl = createMaskedBackground(page.canvas, maskRects);
-          }
-        } catch (err) {
-          log(`  フォールバック: ${err.message}`, 'warn');
-          backgroundImageDataUrl = createMaskedBackground(page.canvas, maskRects);
-        }
-      } else {
-        backgroundImageDataUrl = createMaskedBackground(page.canvas, maskRects);
-      }
-
+      const backgroundImageDataUrl = await generateBackground(
+        apiKey, page.imageDataUrl, page.canvas, normalizedItems, log
+      );
       if (i === 0) ui.setStepStatus('background', 'completed');
       ui.setProgress(baseProgress + 30);
 
@@ -439,14 +431,14 @@ async function processPdf(file, dpiScale, apiKey, useInpainting, log) {
       processedPages.push({ ...page, backgroundImageDataUrl, textBlocks });
 
     } else {
-      // Scanned PDF (no text) → need OCR
+      // Scanned PDF (no text) -> need OCR
       if (!apiKey) {
         log(`  テキストなし＋APIキーなし: 背景画像のみ`, 'warn');
         processedPages.push({ ...page, backgroundImageDataUrl: page.imageDataUrl, textBlocks: [] });
         continue;
       }
 
-      log(`  テキストなし → OCR実行`);
+      log(`  テキストなし → OCR + AI背景生成`);
 
       if (i === 0) ui.setStepStatus('normalize', 'active');
       const resized = await resizeImage(page.imageDataUrl, 2048, 2048, 'image/jpeg', 0.90);
@@ -462,19 +454,11 @@ async function processPdf(file, dpiScale, apiKey, useInpainting, log) {
       }
       if (i === 0) ui.setStepStatus('normalize', 'completed');
 
-      // Mask
-      if (i === 0) ui.setStepStatus('mask', 'active');
-      const maskRects = ocrItems.map(item => ({
-        x: item.relX * page.canvasWidth,
-        y: item.relY * page.canvasHeight,
-        width: item.relWidth * page.canvasWidth,
-        height: item.relHeight * page.canvasHeight,
-      }));
-      if (i === 0) ui.setStepStatus('mask', 'completed');
-
-      // Background
+      // Background - AI generation
       if (i === 0) ui.setStepStatus('background', 'active');
-      const backgroundImageDataUrl = createMaskedBackground(page.canvas, maskRects);
+      const backgroundImageDataUrl = await generateBackground(
+        apiKey, page.imageDataUrl, page.canvas, ocrItems, log
+      );
       if (i === 0) ui.setStepStatus('background', 'completed');
 
       // Text blocks
@@ -505,7 +489,7 @@ async function processPdf(file, dpiScale, apiKey, useInpainting, log) {
 // Image Processing Pipeline
 // ======================================================================
 
-async function processImage(file, apiKey, useInpainting, log) {
+async function processImage(file, apiKey, log) {
   // STEP 1: Load image
   ui.setStepStatus('parse', 'active');
   log('画像を読み込み中...');
@@ -530,44 +514,16 @@ async function processImage(file, apiKey, useInpainting, log) {
   ui.setStepStatus('normalize', 'completed');
   ui.setProgress(30);
 
-  // Mask
+  // Background - AI generation
   ui.setStepStatus('mask', 'active');
-  const maskRects = ocrItems.map(item => ({
-    x: item.relX * page.canvasWidth,
-    y: item.relY * page.canvasHeight,
-    width: item.relWidth * page.canvasWidth,
-    height: item.relHeight * page.canvasHeight,
-  }));
   ui.setStepStatus('mask', 'completed');
-  ui.setProgress(40);
+  ui.setProgress(35);
 
-  // Background
   ui.setStepStatus('background', 'active');
-  let backgroundImageDataUrl;
-
-  if (useInpainting && apiKey) {
-    try {
-      const textRegions = await detectTextRegions(apiKey, imageBase64, log);
-      if (textRegions && textRegions.length > 0) {
-        const refinedMaskRects = textRegions.map(r => ({
-          x: r.x * page.canvasWidth,
-          y: r.y * page.canvasHeight,
-          width: r.width * page.canvasWidth,
-          height: r.height * page.canvasHeight,
-        }));
-        backgroundImageDataUrl = createMaskedBackground(page.canvas, [...maskRects, ...refinedMaskRects]);
-        log('AI支援テキスト除去完了', 'success');
-      } else {
-        backgroundImageDataUrl = createMaskedBackground(page.canvas, maskRects);
-      }
-    } catch (err) {
-      log(`フォールバック: ${err.message}`, 'warn');
-      backgroundImageDataUrl = createMaskedBackground(page.canvas, maskRects);
-    }
-  } else {
-    backgroundImageDataUrl = createMaskedBackground(page.canvas, maskRects);
-  }
-
+  log('AI背景画像を生成中...');
+  const backgroundImageDataUrl = await generateBackground(
+    apiKey, page.imageDataUrl, page.canvas, ocrItems, log
+  );
   ui.setStepStatus('background', 'completed');
   ui.setProgress(60);
 
