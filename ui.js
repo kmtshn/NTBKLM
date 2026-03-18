@@ -357,20 +357,25 @@ export class UIController {
 
   _handleFile(file) {
     const validTypes = [
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       'application/pdf',
       'image/png',
       'image/jpeg',
       'image/webp',
     ];
 
-    if (!validTypes.includes(file.type)) {
-      this.showToast('サポートされていないファイル形式です。PDF, PNG, JPG, WEBPに対応しています。', 'error');
+    // Also check by extension for PPTX (MIME type detection can be unreliable)
+    const ext = file.name.toLowerCase().split('.').pop();
+    const validExts = ['pptx', 'pdf', 'png', 'jpg', 'jpeg', 'webp'];
+
+    if (!validTypes.includes(file.type) && !validExts.includes(ext)) {
+      this.showToast('サポートされていないファイル形式です。PPTX, PDF, PNG, JPG, WEBPに対応しています。', 'error');
       return;
     }
 
-    const maxSize = 50 * 1024 * 1024;
+    const maxSize = 100 * 1024 * 1024; // 100MB (PPTX files can be large)
     if (file.size > maxSize) {
-      this.showToast('ファイルサイズが大きすぎます（最大50MB）', 'error');
+      this.showToast('ファイルサイズが大きすぎます（最大100MB）', 'error');
       return;
     }
 
@@ -435,6 +440,13 @@ export class UIController {
   getDpiScale() { return parseInt(this.dpiScaleSelect.value, 10); }
 
   getUseInpainting() { return this.useInpaintingCheckbox.checked; }
+
+  isPptx() {
+    if (!this.currentFile) return false;
+    const ext = this.currentFile.name.toLowerCase().split('.').pop();
+    return ext === 'pptx' ||
+      this.currentFile.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  }
 
   isPdf() {
     return this.currentFile && this.currentFile.type === 'application/pdf';
