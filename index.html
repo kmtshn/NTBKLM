@@ -103,28 +103,55 @@
 
     .panel-body { padding: 18px; }
 
-    /* API Key Section */
-    .api-key-section {
-      display: flex;
-      align-items: center;
-      gap: 8px;
+    /* API Key Panel */
+    .api-key-panel {
+      background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
+      border: 1px solid var(--primary);
+      border-left: 4px solid var(--primary);
     }
 
-    .api-key-section label {
+    .api-key-panel .panel-header {
+      background: transparent;
+      border-bottom: 1px solid rgba(37,99,235,0.15);
+    }
+
+    .api-key-description {
       font-size: 13px;
-      font-weight: 600;
       color: var(--gray-600);
-      white-space: nowrap;
+      line-height: 1.7;
+      margin-bottom: 14px;
+    }
+
+    .api-key-description a {
+      color: var(--primary);
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    .api-key-description a:hover {
+      text-decoration: underline;
+    }
+
+    .api-key-form {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .api-key-input-wrapper {
+      flex: 1;
+      position: relative;
     }
 
     .api-key-input {
-      width: 280px;
-      padding: 6px 12px;
+      width: 100%;
+      padding: 10px 42px 10px 14px;
       border: 1px solid var(--gray-300);
       border-radius: 6px;
-      font-size: 13px;
-      font-family: monospace;
-      transition: border-color 0.2s;
+      font-size: 14px;
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      background: white;
     }
 
     .api-key-input:focus {
@@ -135,6 +162,128 @@
 
     .api-key-input.valid { border-color: var(--success); }
     .api-key-input.invalid { border-color: var(--error); }
+
+    .api-key-toggle {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 18px;
+      color: var(--gray-400);
+      padding: 4px;
+      line-height: 1;
+      border-radius: 4px;
+    }
+
+    .api-key-toggle:hover {
+      color: var(--gray-600);
+      background: var(--gray-100);
+    }
+
+    .api-key-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-save-key {
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 0 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.2s;
+    }
+
+    .btn-save-key:hover { background: var(--primary-hover); }
+
+    .btn-clear-key {
+      background: white;
+      color: var(--gray-500);
+      border: 1px solid var(--gray-300);
+      border-radius: 6px;
+      padding: 0 12px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .btn-clear-key:hover {
+      color: var(--error);
+      border-color: var(--error);
+      background: var(--error-light);
+    }
+
+    .api-key-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .api-key-status.saved {
+      background: var(--success-light);
+      color: var(--success);
+    }
+
+    .api-key-status.empty {
+      background: var(--warning-light);
+      color: var(--warning);
+    }
+
+    .api-key-status .status-icon {
+      font-size: 14px;
+    }
+
+    .api-key-security-note {
+      font-size: 11px;
+      color: var(--gray-400);
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* Header API key indicator */
+    .header-key-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .header-key-badge.active {
+      background: var(--success-light);
+      color: var(--success);
+      border: 1px solid var(--success);
+    }
+
+    .header-key-badge.inactive {
+      background: var(--warning-light);
+      color: var(--warning);
+      border: 1px solid var(--warning);
+    }
+
+    .header-key-badge:hover {
+      filter: brightness(0.95);
+    }
 
     /* Drop Zone */
     .drop-zone {
@@ -558,7 +707,8 @@
       .main-container { padding: 12px; }
       .app-header { padding: 12px 16px; }
       .app-header h1 { font-size: 16px; }
-      .api-key-input { width: 180px; }
+      .api-key-form { flex-direction: column; }
+      .api-key-actions { justify-content: flex-end; }
       .preview-grid {
         grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
       }
@@ -612,6 +762,29 @@
       from { transform: translateX(100%); opacity: 0; }
       to { transform: translateX(0); opacity: 1; }
     }
+
+    /* API Key Panel flash animation (for onboarding / scroll-to) */
+    .api-key-panel.flash {
+      animation: panelFlash 1.5s ease;
+    }
+
+    @keyframes panelFlash {
+      0% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.4); }
+      30% { box-shadow: 0 0 0 8px rgba(37, 99, 235, 0.2); }
+      60% { box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1); }
+      100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+    }
+
+    /* API key status validating state */
+    .api-key-status.validating {
+      background: var(--primary-light);
+      color: var(--primary);
+    }
+
+    /* Spacing between API key panel and upload panel */
+    .api-key-panel {
+      margin-bottom: 16px;
+    }
   </style>
 </head>
 <body>
@@ -619,10 +792,10 @@
   <header class="app-header">
     <h1><span class="icon">📄</span> PDF/Image → Editable PPTX</h1>
     <div class="header-actions">
-      <form class="api-key-section" onsubmit="return false;">
-        <label for="apiKeyInput">OpenAI API Key:</label>
-        <input type="password" id="apiKeyInput" class="api-key-input" placeholder="sk-..." autocomplete="off">
-      </form>
+      <div class="header-key-badge inactive" id="headerKeyBadge" title="APIキー設定へスクロール">
+        <span class="status-icon" id="headerKeyIcon">&#9888;&#65039;</span>
+        <span id="headerKeyText">APIキー未設定</span>
+      </div>
     </div>
   </header>
 
@@ -630,6 +803,40 @@
   <div class="main-container">
     <!-- Left: Main Area -->
     <div class="main-area">
+      <!-- API Key Settings Panel -->
+      <div class="panel api-key-panel" id="apiKeyPanel">
+        <div class="panel-header">
+          <span>&#128273;</span> OpenAI APIキー設定
+        </div>
+        <div class="panel-body">
+          <div class="api-key-description">
+            このアプリはお使いのブラウザから直接 OpenAI API を呼び出します。<br>
+            サーバーにAPIキーが送信されることはありません。<br>
+            APIキーは <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">OpenAI ダッシュボード</a> から取得できます。
+          </div>
+
+          <form class="api-key-form" id="apiKeyForm" onsubmit="return false;">
+            <div class="api-key-input-wrapper">
+              <input type="password" id="apiKeyInput" class="api-key-input" placeholder="sk-proj-... (APIキーを入力)" autocomplete="off" spellcheck="false">
+              <button type="button" class="api-key-toggle" id="apiKeyToggle" title="表示/非表示">&#128065;</button>
+            </div>
+            <div class="api-key-actions">
+              <button type="button" class="btn-save-key" id="saveKeyBtn">保存</button>
+              <button type="button" class="btn-clear-key" id="clearKeyBtn">削除</button>
+            </div>
+          </form>
+
+          <div class="api-key-status empty" id="apiKeyStatus">
+            <span class="status-icon">&#9888;&#65039;</span>
+            <span id="apiKeyStatusText">APIキーが設定されていません</span>
+          </div>
+
+          <div class="api-key-security-note">
+            &#128274; APIキーはこのブラウザのローカルストレージにのみ保存されます。外部には一切送信されません。
+          </div>
+        </div>
+      </div>
+
       <!-- Upload Panel -->
       <div class="panel">
         <div class="panel-header">

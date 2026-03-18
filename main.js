@@ -4,7 +4,7 @@
  * Connects all modules and manages the conversion pipeline:
  * 
  * PDF Input:
- *   STEP1: PDF解析 (Parse PDF → Canvas + Text Items)
+ *   STEP1: PDF解析 (Parse PDF -> Canvas + Text Items)
  *   STEP2: 座標正規化 (Normalize coordinates to 0-1)
  *   STEP3: テキスト領域抽出 (Generate mask rectangles)
  *   STEP4: 背景生成 (Create background with text removed)
@@ -74,9 +74,17 @@ async function startConversion() {
     ui.showToast('ファイルを選択してください', 'warning');
     return;
   }
-  if (!apiKey) {
-    ui.showToast('OpenAI APIキーを入力してください', 'warning');
+
+  // Image input requires API key for OCR
+  if (ui.isImage() && !apiKey) {
+    ui.showToast('画像ファイルの変換にはOpenAI APIキーが必要です（OCR処理のため）。APIキーを保存してから再度お試しください。', 'error', 8000);
     return;
+  }
+
+  // PDF can work without API key (local-only mode)
+  if (ui.isPdf() && !apiKey) {
+    ui.showToast('APIキー未設定のため、AI機能なしのローカルモードで変換します。テキスト除去の品質が低下する場合があります。', 'warning', 6000);
+    ui.log('ローカルモード: APIキーが設定されていないため、AI機能は無効です', 'warn');
   }
 
   sourceFileName = file.name;
@@ -87,7 +95,7 @@ async function startConversion() {
 
   const dpiScale = ui.getDpiScale();
   const slideSize = ui.getSlideSize();
-  const useInpainting = ui.getUseInpainting();
+  const useInpainting = ui.getUseInpainting() && !!apiKey; // Only use inpainting if API key is available
 
   const log = (msg, level) => ui.log(msg, level);
 
@@ -105,7 +113,7 @@ async function startConversion() {
     // Show previews
     ui.showPreviews(pages);
 
-    // STEP 7: Coordinate conversion (already done as relative → will be converted in PPTX gen)
+    // STEP 7: Coordinate conversion (already done as relative -> will be converted in PPTX gen)
     ui.setStepStatus('convert', 'active');
     log('座標変換を実行中...');
     // The conversion happens in the PPTX generator using relative coords + slide dimensions
@@ -230,7 +238,11 @@ async function processPdf(file, dpiScale, useInpainting, apiKey, log) {
       }
     } else {
       backgroundImageDataUrl = createMaskedBackground(page.canvas, maskRects);
-      log(`  ローカルマスキングで背景生成`);
+      if (!apiKey) {
+        log(`  ローカルモード: APIなしで背景生成`);
+      } else {
+        log(`  ローカルマスキングで背景生成`);
+      }
     }
 
     if (i === 0) ui.setStepStatus('background', 'completed');
@@ -281,7 +293,7 @@ async function processImage(file, useInpainting, apiKey, log) {
   log('画像を読み込み中...');
 
   const page = await loadImageAsPage(file);
-  log(`画像サイズ: ${page.pdfWidth}×${page.pdfHeight}px`, 'success');
+  log(`画像サイズ: ${page.pdfWidth}x${page.pdfHeight}px`, 'success');
   ui.setStepStatus('parse', 'completed');
   ui.setProgress(10);
 
