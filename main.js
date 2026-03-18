@@ -31,30 +31,30 @@
  *     AI generation fails or API key is unavailable
  */
 
-import { UIController } from './ui.js';
-import { parsePptx } from './pptxParser.js';
+import { UIController } from './ui.js?v=20260318b';
+import { parsePptx } from './pptxParser.js?v=20260318b';
 import {
   parsePdf,
   normalizeCoordinates,
   generateMaskRects,
   groupTextIntoLines,
   groupLinesIntoParagraphs,
-} from './pdfProcessor.js';
+} from './pdfProcessor.js?v=20260318b';
 import {
   loadImageAsPage,
   createMaskedBackground,
   resizeImage,
   dataUrlToBase64,
   dataUrlToMimeType,
-} from './imageProcessor.js';
+} from './imageProcessor.js?v=20260318b';
 import {
   performOcr,
   generateCleanBackground,
-} from './openaiClient.js';
+} from './openaiClient.js?v=20260318b';
 import {
   generatePptx,
   downloadPptx,
-} from './pptGenerator.js';
+} from './pptGenerator.js?v=20260318b';
 
 // Initialize UI
 const ui = new UIController();

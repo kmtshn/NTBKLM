@@ -8,9 +8,9 @@
  */
 
 const CHAT_API_URL = 'https://api.openai.com/v1/chat/completions';
-const IMAGE_EDIT_API_URL = 'https://api.openai.com/v1/images/edits';
+const RESPONSES_API_URL = 'https://api.openai.com/v1/responses';
 const VISION_MODEL = 'gpt-4o';
-const IMAGE_MODEL = 'gpt-image-1';
+const IMAGE_GEN_MODEL = 'gpt-4o';
 
 /**
  * Perform comprehensive OCR on a slide image.
@@ -120,12 +120,14 @@ CRITICAL RULES:
 }
 
 /**
- * Generate a text-free background image using OpenAI Image Edit API.
+ * Generate a text-free background image using OpenAI Responses API.
  * 
- * Sends the original slide image to gpt-image-1 with a prompt to
+ * Uses the Responses API with gpt-4o and the image_generation tool.
+ * Sends the original slide image as input and asks the model to
  * reproduce the slide's visual design but with ALL text removed.
- * The result is a brand-new image that preserves the layout, colors,
- * shapes, icons, and overall visual feel — but without any text.
+ * 
+ * This approach uses the same API access as the OCR (Chat/Responses),
+ * avoiding the 403 errors that can occur with the Images API endpoint.
  * 
  * @param {string} apiKey - OpenAI API key
  * @param {string} imageBase64 - Base64 encoded image (PNG or JPEG)
@@ -150,33 +152,47 @@ IMPORTANT RULES:
 - Maintain the same aspect ratio and overall composition
 - The background areas where text was removed should blend seamlessly`;
 
-  // Convert base64 to Blob for FormData
-  const imageBlob = base64ToBlob(imageBase64, mimeType);
-  const ext = mimeType === 'image/png' ? 'png' : 'jpg';
-
-  // Determine best output size based on aspect ratio
-  // gpt-image-1 supports: 1024x1024, 1024x1536, 1536x1024, auto
-  const size = 'auto';
-
-  const formData = new FormData();
-  formData.append('model', IMAGE_MODEL);
-  formData.append('image', imageBlob, `slide.${ext}`);
-  formData.append('prompt', prompt);
-  formData.append('size', size);
-  formData.append('quality', 'high');
+  const dataUrlPrefix = mimeType === 'image/png' ? 'data:image/png;base64,' : 'data:image/jpeg;base64,';
 
   let lastError;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      onLog(`  画像生成API呼び出し中... (試行 ${attempt}/3)`);
+      onLog(`  Responses API画像生成呼び出し中... (試行 ${attempt}/3)`);
 
-      const response = await fetch(IMAGE_EDIT_API_URL, {
+      const requestBody = {
+        model: IMAGE_GEN_MODEL,
+        input: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'input_text',
+                text: prompt,
+              },
+              {
+                type: 'input_image',
+                image_url: `${dataUrlPrefix}${imageBase64}`,
+              },
+            ],
+          },
+        ],
+        tools: [
+          {
+            type: 'image_generation',
+            quality: 'medium',
+            size: 'auto',
+          },
+        ],
+      };
+
+      const response = await fetch(RESPONSES_API_URL, {
         method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`,
         },
-        body: formData,
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -201,23 +217,40 @@ IMPORTANT RULES:
           continue;
         }
 
-        throw new Error(`Image API error (${response.status}): ${errorMsg}`);
+        throw new Error(`Responses API error (${response.status}): ${errorMsg}`);
       }
 
       const result = await response.json();
 
-      if (result.data && result.data.length > 0 && result.data[0].b64_json) {
-        const base64Data = result.data[0].b64_json;
+      // Extract image from Responses API output
+      // The output array contains items; look for image_generation_call type
+      const imageOutput = result.output?.find(
+        item => item.type === 'image_generation_call' && item.result
+      );
+
+      if (imageOutput && imageOutput.result) {
+        const base64Data = imageOutput.result;
         const dataUrl = `data:image/png;base64,${base64Data}`;
 
         // Log token usage if available
         if (result.usage) {
-          onLog(`  画像生成完了 (入力: ${result.usage.input_tokens}トークン, 出力: ${result.usage.output_tokens}トークン)`);
+          const inputTokens = result.usage.input_tokens || 0;
+          const outputTokens = result.usage.output_tokens || 0;
+          onLog(`  画像生成完了 (入力: ${inputTokens}トークン, 出力: ${outputTokens}トークン)`);
         } else {
           onLog('  AI背景画像生成完了', 'success');
         }
 
         return dataUrl;
+      }
+
+      // Check if there's text output explaining why no image was generated
+      const textOutput = result.output?.find(
+        item => item.type === 'message' && item.content
+      );
+      if (textOutput) {
+        const textContent = textOutput.content?.map(c => c.text).join('') || '';
+        throw new Error(`画像生成失敗: ${textContent.substring(0, 200)}`);
       }
 
       throw new Error('画像データが応答に含まれていません');
@@ -294,21 +327,6 @@ async function callVisionApi(apiKey, messages, maxTokens = 4096, maxRetries = 3)
   }
 
   throw lastError;
-}
-
-/**
- * Convert a base64 string to a Blob.
- * @param {string} base64 - Base64 encoded data
- * @param {string} mimeType - MIME type
- * @returns {Blob}
- */
-function base64ToBlob(base64, mimeType = 'image/png') {
-  const binaryStr = atob(base64);
-  const bytes = new Uint8Array(binaryStr.length);
-  for (let i = 0; i < binaryStr.length; i++) {
-    bytes[i] = binaryStr.charCodeAt(i);
-  }
-  return new Blob([bytes], { type: mimeType });
 }
 
 /**
