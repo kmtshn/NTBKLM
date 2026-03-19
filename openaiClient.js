@@ -3,7 +3,7 @@
  * 
  * Handles:
  * - Structured OCR via GPT-4o vision (optimized for Japanese business documents)
- * - AI background generation via Cloudflare Workers proxy (gpt-image-1)
+ * - AI background generation via Cloudflare Workers proxy (gpt-image-1.5)
  * - API error handling, retries, and rate limiting
  * 
  * Image generation is routed through a Cloudflare Workers endpoint
@@ -125,40 +125,41 @@ CRITICAL RULES:
 /**
  * Generate a text-free background image via Cloudflare Workers proxy.
  * 
- * Uses OpenAI's /v1/images/edits endpoint (proxied through Workers).
- * The original slide image is sent as a reference so gpt-image-1 can
- * see the actual design and reproduce it WITHOUT text.
+ * Uses OpenAI's /v1/images/edits endpoint (proxied through Workers)
+ * with gpt-image-1.5 for precise editing that preserves the original
+ * image composition.
+ * 
+ * A mask image is generated from OCR bounding boxes so the model
+ * knows exactly which areas contain text and should be inpainted.
  * 
  * Workers handles the OpenAI API key server-side — NO api key or
  * Authorization header is sent from the browser.
  * 
- * Request:  POST { model, prompt, image, size } -> Workers -> OpenAI /v1/images/edits
+ * Request:  POST { model, prompt, image, mask, size } -> Workers -> OpenAI /v1/images/edits
  * Response: { data: [{ b64_json: "..." }] }
  * 
  * @param {string} imageBase64 - Base64 encoded original slide image
  * @param {string} mimeType - MIME type of the image ('image/png' or 'image/jpeg')
+ * @param {Array} ocrItems - OCR items with relative coordinates for mask generation
+ * @param {number} imageWidth - Original image width in pixels
+ * @param {number} imageHeight - Original image height in pixels
  * @param {function} onLog - Logging callback
  * @returns {Promise<string>} Data URL of the generated background image
  */
-export async function generateCleanBackground(imageBase64, mimeType = 'image/png', onLog = () => {}) {
-  onLog('AI画像編集で背景を作成中（元画像参照 → テキスト除去）...');
+export async function generateCleanBackground(imageBase64, mimeType = 'image/png', ocrItems = [], imageWidth = 0, imageHeight = 0, onLog = () => {}) {
+  onLog('AI画像編集で背景を作成中（gpt-image-1.5 + マスク）...');
 
-  const prompt = `Look at this presentation slide image carefully.
-Reproduce the EXACT same image but with ALL text completely removed.
-
-IMPORTANT RULES:
-- Keep the exact same layout, background colors, gradients, patterns
-- Keep all icons, logos, images, diagrams, shapes, lines, borders
-- Keep the exact same color scheme and visual style
-- Remove ALL text characters (Japanese, English, numbers, symbols used as labels)
-- Where text was, fill naturally with the surrounding background color/pattern
-- The result should look like a clean template/background ready for new text overlay
-- Do NOT add any new elements, watermarks, or text
-- Maintain the same aspect ratio and overall composition
-- The background areas where text was removed should blend seamlessly`;
+  const prompt = `Remove all text from this presentation slide. Inpaint the text areas with the surrounding background. Keep everything else exactly as-is.`;
 
   // Build the data URL for the source image
   const imageDataUrl = `data:${mimeType};base64,${imageBase64}`;
+
+  // Generate a mask from OCR bounding boxes if available
+  let maskDataUrl = null;
+  if (ocrItems.length > 0 && imageWidth > 0 && imageHeight > 0) {
+    maskDataUrl = generateMaskFromOcr(ocrItems, imageWidth, imageHeight);
+    onLog(`  OCRマスク生成完了: ${ocrItems.length}箇所のテキスト領域`);
+  }
 
   let lastError;
 
@@ -167,12 +168,18 @@ IMPORTANT RULES:
       onLog(`  Workers API画像編集呼び出し中... (試行 ${attempt}/3)`);
 
       const requestBody = {
-        model: 'gpt-image-1',
+        model: 'gpt-image-1.5',
         prompt: prompt,
         image: imageDataUrl,
-        size: 'auto',
+        size: '1536x1024',
         quality: 'medium',
+        input_fidelity: 'high',
       };
+
+      // Include mask if generated
+      if (maskDataUrl) {
+        requestBody.mask = maskDataUrl;
+      }
 
       const response = await fetch(WORKERS_IMAGE_URL, {
         method: 'POST',
@@ -210,7 +217,7 @@ IMPORTANT RULES:
 
       if (b64Json) {
         const dataUrl = `data:image/png;base64,${b64Json}`;
-        onLog('  AI背景画像生成完了（元画像ベース）', 'success');
+        onLog('  AI背景画像生成完了（gpt-image-1.5 + マスク）', 'success');
         return dataUrl;
       }
 
@@ -226,6 +233,54 @@ IMPORTANT RULES:
   }
 
   throw lastError;
+}
+
+/**
+ * Generate a mask image (PNG data URL) from OCR bounding boxes.
+ * 
+ * The mask is a black image with white rectangles where text was detected.
+ * White areas = regions to be inpainted (text removed).
+ * Black areas = regions to be preserved.
+ * 
+ * Uses a Canvas element to draw the mask at the same dimensions
+ * as the source image.
+ * 
+ * @param {Array} ocrItems - OCR items with relX, relY, relWidth, relHeight
+ * @param {number} width - Image width in pixels
+ * @param {number} height - Image height in pixels
+ * @returns {string} PNG data URL of the mask
+ */
+function generateMaskFromOcr(ocrItems, width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  // Black background = preserve these areas
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, width, height);
+
+  // White rectangles = areas to inpaint (remove text)
+  ctx.fillStyle = '#FFFFFF';
+
+  for (const item of ocrItems) {
+    const x = (item.relX || item.x || 0) * width;
+    const y = (item.relY || item.y || 0) * height;
+    const w = (item.relWidth || item.width || 0.1) * width;
+    const h = (item.relHeight || item.height || 0.03) * height;
+
+    // Add padding around text regions for cleaner inpainting
+    const padX = w * 0.1;
+    const padY = h * 0.3;
+    ctx.fillRect(
+      Math.max(0, x - padX),
+      Math.max(0, y - padY),
+      Math.min(w + padX * 2, width),
+      Math.min(h + padY * 2, height)
+    );
+  }
+
+  return canvas.toDataURL('image/png');
 }
 
 /**

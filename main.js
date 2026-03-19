@@ -31,30 +31,30 @@
  *     AI generation fails
  */
 
-import { UIController } from './ui.js?v=20260319a';
-import { parsePptx } from './pptxParser.js?v=20260319a';
+import { UIController } from './ui.js?v=20260319c';
+import { parsePptx } from './pptxParser.js?v=20260319c';
 import {
   parsePdf,
   normalizeCoordinates,
   generateMaskRects,
   groupTextIntoLines,
   groupLinesIntoParagraphs,
-} from './pdfProcessor.js?v=20260319a';
+} from './pdfProcessor.js?v=20260319c';
 import {
   loadImageAsPage,
   createMaskedBackground,
   resizeImage,
   dataUrlToBase64,
   dataUrlToMimeType,
-} from './imageProcessor.js?v=20260319a';
+} from './imageProcessor.js?v=20260319c';
 import {
   performOcr,
   generateCleanBackground,
-} from './openaiClient.js?v=20260319a';
+} from './openaiClient.js?v=20260319c';
 import {
   generatePptx,
   downloadPptx,
-} from './pptGenerator.js?v=20260319a';
+} from './pptGenerator.js?v=20260319c';
 
 // Initialize UI
 const ui = new UIController();
@@ -178,12 +178,21 @@ async function startConversion() {
  */
 async function generateBackground(imageDataUrl, canvas, ocrItems, log) {
   try {
-    // Resize image for API (gpt-image-1 accepts up to 50MB but smaller = faster)
+    // Resize image for API (gpt-image-1.5 accepts up to 50MB but smaller = faster)
     const resized = await resizeImage(imageDataUrl, 2048, 2048, 'image/png', 1.0);
     const base64 = dataUrlToBase64(resized);
     const mimeType = dataUrlToMimeType(resized);
 
-    const bgDataUrl = await generateCleanBackground(base64, mimeType, log);
+    // Get resized image dimensions for mask generation
+    const img = new Image();
+    const imgDims = await new Promise((resolve) => {
+      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.src = resized;
+    });
+
+    const bgDataUrl = await generateCleanBackground(
+      base64, mimeType, ocrItems, imgDims.width, imgDims.height, log
+    );
     return bgDataUrl;
   } catch (err) {
     log(`  AI背景生成失敗: ${err.message}`, 'warn');
