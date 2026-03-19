@@ -5,6 +5,11 @@
  * The OpenAI API key is stored as a Workers secret (OPENAI_API_KEY),
  * so it never appears in frontend code.
  * 
+ * Supports:
+ *   - Image editing with mask (gpt-image-1.5 inpainting)
+ *   - Image editing without mask
+ *   - Image generation (no source image)
+ * 
  * DEPLOY:
  *   1. cd workers/
  *   2. wrangler secret put OPENAI_API_KEY   (paste your sk-... key)
@@ -14,11 +19,13 @@
  *   POST / 
  *   Content-Type: application/json
  *   {
- *     "model": "gpt-image-1",
+ *     "model": "gpt-image-1.5",
  *     "prompt": "Remove all text from this slide...",
  *     "image": "data:image/png;base64,iVBOR...",   // original slide image
- *     "size": "1536x1024",                          // optional, default auto
- *     "quality": "medium"                            // optional, default medium
+ *     "mask": "data:image/png;base64,iVBOR...",     // optional: OCR-based mask
+ *     "size": "1536x1024",
+ *     "quality": "medium",
+ *     "input_fidelity": "high"
  *   }
  * 
  * RESPONSE FORMAT (passed through from OpenAI):
@@ -44,7 +51,7 @@ export default {
 
     try {
       const body = await request.json();
-      const { model, prompt, image, size, quality } = body;
+      const { model, prompt, image, mask, size, quality, input_fidelity } = body;
 
       if (!prompt) {
         return jsonError('Missing required field: prompt', 400);
@@ -52,9 +59,9 @@ export default {
 
       // Build the OpenAI API request body
       const openaiBody = {
-        model: model || 'gpt-image-1',
+        model: model || 'gpt-image-1.5',
         prompt: prompt,
-        size: size || 'auto',
+        size: size || '1536x1024',
         quality: quality || 'medium',
       };
 
@@ -66,6 +73,15 @@ export default {
         // The images/edits endpoint accepts images as an array of objects
         // with image_url field for base64 data URLs
         openaiBody.images = [{ image_url: image }];
+        // input_fidelity controls how closely the output matches the input
+        if (input_fidelity) {
+          openaiBody.input_fidelity = input_fidelity;
+        }
+        // Mask: tells the model which areas to inpaint
+        // White areas = inpaint (remove text), Black areas = preserve
+        if (mask) {
+          openaiBody.mask = { image_url: mask };
+        }
       } else {
         endpoint = 'https://api.openai.com/v1/images/generations';
       }
