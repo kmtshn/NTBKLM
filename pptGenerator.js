@@ -111,27 +111,24 @@ function calculateSlideDimensions(pages, slideSize) {
 /**
  * LAYER 1: Add background image to slide.
  * 
- * Uses PptxGenJS's slide.background API for a true full-bleed background.
- * This avoids any sizing/positioning edge cases that can occur with addImage.
- * Falls back to addImage stretched to slide dimensions if background API fails.
+ * Uses addImage with explicit w/h matching the slide dimensions.
+ * This stretches the image to fill the entire slide — no cropping.
+ * 
+ * NOTE: slide.background API crops to fit (center-crop), which cuts
+ * the left/right edges when the image aspect ratio differs from the
+ * slide. Using addImage with w=slideWidth, h=slideHeight avoids this.
  */
 function addBackgroundLayer(slide, page, dimensions) {
   const imgSrc = page.backgroundImageDataUrl || page.imageDataUrl;
   if (!imgSrc) return;
 
-  try {
-    // Use slide.background for guaranteed full-bleed coverage
-    slide.background = { data: imgSrc };
-  } catch {
-    // Fallback: stretch image to fill entire slide
-    slide.addImage({
-      data: imgSrc,
-      x: 0,
-      y: 0,
-      w: dimensions.width,
-      h: dimensions.height,
-    });
-  }
+  slide.addImage({
+    data: imgSrc,
+    x: 0,
+    y: 0,
+    w: dimensions.width,
+    h: dimensions.height,
+  });
 }
 
 /**
